@@ -2,14 +2,15 @@
 
 import sys
 import time
-import boto
-import pytz
 import random
 import logging
 import itertools
-import dateutil.parser
 from optparse import OptionParser
 from datetime import datetime, timedelta
+
+import boto
+import pytz
+import dateutil.parser
 from boto.ec2.connection import EC2Connection
 
 logging.basicConfig(level=logging.INFO)
@@ -18,6 +19,8 @@ def _getnow():
     return datetime.now(tz=pytz.UTC)
 
 def _validate_days(days):
+    if not days:
+        raise ValueError("no days specified")
     if sorted(days) != days:
         raise ValueError("days must be in ascending order")
     diffs = [ (days[i] - days[i-1]) if i != 0 else 0
@@ -103,7 +106,8 @@ def simulate(days):
 
         time.sleep(0.5)
 
-def manage_snapshots(days, ec2connection, vol_id, timeout=timedelta(minutes=15)):
+def manage_snapshots(days, ec2connection, vol_id, timeout=timedelta(minutes=15),
+                     description='snapman'):
     volumes = ec2connection.get_all_volumes([vol_id])
     if vol_id not in [v.id for v in volumes]:
         raise Exception("Volume ID not found")
@@ -112,7 +116,7 @@ def manage_snapshots(days, ec2connection, vol_id, timeout=timedelta(minutes=15))
 
     start = _getnow()
 
-    descr = start.strftime('snapman %Y-%m-%d--%H:%M')
+    descr = description + " " + start.strftime('%Y-%m-%d--%H:%M')
 
     logging.info("Creating snapshot for %r: %r" % (volume, descr))
     volume.create_snapshot(description=descr)
@@ -127,15 +131,15 @@ def manage_snapshots(days, ec2connection, vol_id, timeout=timedelta(minutes=15))
     while True:
         new.update()
         if new.status == 'completed':
-            logging.info("Snapshot %r completed in %r" % (new, _getnow() - start))
+            logging.info("%r completed in %s" % (new, _getnow() - start))
             break
         elif timeout is not None and _getnow() > start + timeout:
             raise Exception("Timed out creating %r" % (new,))
         else:
-            logging.info("Waiting for snapshot %r: %r" % (new, new.progress))
-            time.sleep(0.5)
+            logging.debug("Waiting for snapshot %r: %r" % (new, new.progress))
+            time.sleep(5)
 
-    # get the new list of snapshots now that we're in it and completed
+    # get the new list of snapshots now that the new one is completed
     snapshots = volume.snapshots()
 
     def _key(sn):
@@ -144,8 +148,11 @@ def manage_snapshots(days, ec2connection, vol_id, timeout=timedelta(minutes=15))
     keep, delete = expire_days(days, snapshots, key=_key)
 
     for sn in delete:
-        logging.info("Deleting snapshot %r" % (sn,))
-        sn.delete()
+        if sn.id == new.id:
+            logging.warning("I will never delete the snapshot that I just created")
+        else:
+            logging.info("Deleting snapshot %r" % (sn,))
+            sn.delete()
 
     logging.info("Remaining snapshots:\n%s" % ('\n'.join(map(repr, keep)),))
 
@@ -154,9 +161,13 @@ def manage_snapshots(days, ec2connection, vol_id, timeout=timedelta(minutes=15))
 def main():
     default_days = '1,2,3,4,5,6,7,14,21,28,42,56,84,112'
     parser = OptionParser(usage="usage: %prog [options] vol_id")
+    parser.add_option('--description', default='snapman', dest='description',
+                      help="prefix for snapshot description")
+    parser.add_option('--timeout', type='int', default=0, dest='timeout',
+                      help="timeout in minutes for creating snapshot")
     parser.add_option('--days', '-d',
                       default=default_days,
-                      help="Day spans to keep ([default %default])")
+                      help="Day spans to keep [default %default]")
     parser.add_option("-v", "--verbose",
                       action="store_true", dest="verbose", default=False)
     parser.add_option('--simulate', dest='simulate',
@@ -182,9 +193,13 @@ def main():
         sys.exit(1)
     vol_id = args[0]
 
+    timeout=None
+    if options.timeout:
+        timeout = timedelta(minutes=options.timeout)
+
     conn = EC2Connection()
 
-    return manage_snapshots(days, conn, vol_id)
+    return manage_snapshots(days, conn, vol_id, timeout=timeout, description=options.description)
 
 if __name__ == '__main__':
     main()
