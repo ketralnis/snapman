@@ -119,7 +119,8 @@ def manage_snapshots(days, ec2connection, vol_id, timeout=timedelta(minutes=15),
     descr = description + " " + start.strftime('%Y-%m-%d--%H:%M')
 
     logging.info("Creating snapshot for %r: %r" % (volume, descr))
-    volume.create_snapshot(description=descr)
+    if not volume.create_snapshot(description=descr):
+        raise Exception("Failed to create snapshot?")
 
     snapshots = volume.snapshots()
 
@@ -154,7 +155,9 @@ def manage_snapshots(days, ec2connection, vol_id, timeout=timedelta(minutes=15),
             logging.info("Deleting snapshot %r" % (sn,))
             sn.delete()
 
-    logging.info("Remaining snapshots:\n%s" % ('\n'.join(map(repr, keep)),))
+    report = '\n'.join(('\t%r (%s)' % (sn, dateutil.parser.parse(sn.start_time)))
+                        for sn in keep)
+    logging.info("Remaining snapshots:\n%s" % (report,))
 
     return keep, delete
 
@@ -172,7 +175,7 @@ def main():
                       action="store_true", dest="verbose", default=False)
     parser.add_option('--simulate', dest='simulate',
                       default=False, action='store_true',
-                      help="Simulate and print the progression of backups using the given --days settings")
+                      help="Simulate and print the progression of backups using the given --days setting")
 
     (options, args) = parser.parse_args()
 

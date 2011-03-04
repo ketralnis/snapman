@@ -28,5 +28,7 @@ use boto's configuration files or environment variables <http://code.google.com/
 To do
 -----
 
-Don't delete snapshots that we didn't create (perhaps by checking the description prefix)
+* don't delete snapshots that we didn't create (perhaps by checking the description prefix)
+* mount snapshots at /${mountpoint}/.snap/${timestamp}/
+
 
