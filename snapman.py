@@ -23,7 +23,7 @@ def _getnow():
     return datetime.now(tz=pytz.UTC)
 
 days_parse_re = re.compile('^([0-9.]+)([sMhdwmy]?)$')
-def parse_days(days_str):
+def parse_days(days_str, single=False):
     specs = map(str.strip, days_str.split(','))
     spans = []
 
@@ -61,6 +61,11 @@ def parse_days(days_str):
 
     if sorted(diffs) != diffs:
         raise ValueError("diffs must be in ascending order")
+
+    if single:
+        if len(spans) != 1:
+            raise ValueError('single expected just one?')
+        return int(spans[0])
 
     return map(int, spans)
 
@@ -116,12 +121,11 @@ class FakeBackup(object):
         return '<%s(%s)>' % (self.__class__.__name__,
                              self.birthday)
 
-def simulate(days, tickspan):
-    start = now = _getnow()
+    def __eq__(self, other):
+        return self.birthday == other.birthday
 
-    ticks = parse_days(tickspan)
-    assert len(ticks) == 1
-    ticksdiff = timedelta(seconds=ticks[0])
+def simulate(days, ticksdiff):
+    start = now = _getnow()
 
     backups = [] # [FakeBackup(start+timedelta(days=-x)) for x in xrange(1, 100)]
 
@@ -130,7 +134,9 @@ def simulate(days, tickspan):
     try:
         ticks = 0
         while True:
-            now += ticksdiff
+            # Amazon's snapshots take a varying amount of time so we
+            # simulate that too
+            now = start + timedelta(seconds=ticksdiff*ticks+random.randint(0, 5*60))
             ticks += 1
 
             def _key(o):
@@ -140,6 +146,11 @@ def simulate(days, tickspan):
 
             backups.append(created)
             backups, deleted = expire_days(days, backups, key=_key)
+            if created in deleted:
+                # refuse to delete the one we just created like
+                # manage_snapshots does
+                logging.debug('Would have deleted the just-created %r' % (created,))
+                backups += [created]
             print "It's %s (%s in). %d deleted %r" % (now, now-start, len(deleted), deleted)
             for x in sorted(backups, key=_key):
                 print "\tWe have %s: (%s old)" % (str(x), now-x.birthday)
@@ -213,7 +224,7 @@ def main():
     parser.add_option('--description', default='snapman', dest='description',
                       help="prefix for snapshot description")
     parser.add_option('--timeout', type='int', default=0, dest='timeout',
-                      help="timeout in minutes for creating snapshot")
+                      help="timeout for creating snapshots (see --days for units)")
     parser.add_option('--days', '-d',
                       default=default_days,
                       help="Time spans to keep [default %default]. Units h=hours, d=days (default), w=weeks, m=months, y=years. n.b. use --simulate to make sure that your setting behaves as you think it will")
@@ -234,7 +245,8 @@ def main():
         sys.exit(1)
 
     if options.simulate:
-        simulate(days, options.simulate)
+        tickspan = parse_days(options.simulate, single=True)
+        simulate(days, tickspan)
         sys.exit(0)
 
     if len(args) != 1:
@@ -244,7 +256,7 @@ def main():
 
     timeout=None
     if options.timeout:
-        timeout = timedelta(minutes=options.timeout)
+        timeout = timedelta(seconds=parse_days(options.timeout, single=True))
 
     conn = EC2Connection()
 
