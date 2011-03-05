@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 
+import re
 import sys
 import time
 import random
@@ -15,18 +16,53 @@ from boto.ec2.connection import EC2Connection
 
 logging.basicConfig(level=logging.INFO)
 
+def _tdseconds(delta):
+    return delta.days * 86400 + delta.seconds
+
 def _getnow():
     return datetime.now(tz=pytz.UTC)
 
-def _validate_days(days):
-    if not days:
+days_parse_re = re.compile('^([0-9.]+)([sMhdwmy]?)$')
+def parse_days(days_str):
+    specs = map(str.strip, days_str.split(','))
+    spans = []
+
+    for spec in specs:
+        spec_match = days_parse_re.match(spec)
+        if not spec_match:
+            raise Exception("Couldn't parse \"%s\"" % (spec,))
+
+        num_units = float(spec_match.group(1))
+        unit_type = spec_match.group(2)
+
+        if unit_type == 's':
+            spans.append(num_units)
+        elif unit_type == 'M':
+            spans.append(num_units*60)
+        elif unit_type == 'h':
+            spans.append(num_units*60*60)
+        elif unit_type == 'd' or unit_type == '':
+            spans.append(num_units*60*60*24)
+        elif unit_type == 'w':
+            spans.append(num_units*60*60*24*7)
+        elif unit_type == 'm':
+            spans.append(num_units*60*60*24*7*4) # n.b. a 'month' is 4 weeks
+        elif unit_type == 'y':
+            spans.append(num_units*60*60*24*7*4*12) # and a year is 12 of our 'months'
+
+    if not spans:
         raise ValueError("no days specified")
-    if sorted(days) != days:
+
+    if sorted(spans) != spans:
         raise ValueError("days must be in ascending order")
-    diffs = [ (days[i] - days[i-1]) if i != 0 else 0
-              for i in range(len(days)) ]
+
+    diffs = [ (spans[i] - spans[i-1]) if i != 0 else 0
+              for i in range(len(spans)) ]
+
     if sorted(diffs) != diffs:
-        raise ValueError("diffs must be in ascending order")    
+        raise ValueError("diffs must be in ascending order")
+
+    return map(int, spans)
 
 def expire_days(days, found, key=lambda x: x):
     # 'key' must return the number of days old that an item is
@@ -77,34 +113,41 @@ class FakeBackup(object):
         self.birthday = birthday
 
     def __repr__(self):
-        return '<%s(%s)>' % (self.__class__.__name__, self.birthday.date())
+        return '<%s(%s)>' % (self.__class__.__name__,
+                             self.birthday)
 
-def simulate(days):
-    _validate_days(days)
-    
-    start = _getnow()
+def simulate(days, tickspan):
+    start = now = _getnow()
+
+    ticks = parse_days(tickspan)
+    assert len(ticks) == 1
+    ticksdiff = timedelta(seconds=ticks[0])
 
     backups = [] # [FakeBackup(start+timedelta(days=-x)) for x in xrange(1, 100)]
 
     print 'Starting with', days, backups
 
-    ticks = 0
-    while True:
-        now = start + timedelta(days=ticks)
-        ticks += 1
+    try:
+        ticks = 0
+        while True:
+            now += ticksdiff
+            ticks += 1
 
-        def _key(o):
-            return (now - o.birthday).days
+            def _key(o):
+                return _tdseconds(now - o.birthday)
 
-        created = FakeBackup(now)
+            created = FakeBackup(now)
 
-        backups.append(created)
-        backups, deleted = expire_days(days, backups, key=_key)
-        print "It's %s (%d days in). %d deleted %r" % (now.date(), ticks, len(deleted), deleted)
-        for x in sorted(backups, key=_key):
-            print "\tWe have %s: (%d days old)" % (str(x), (now-x.birthday).days)
+            backups.append(created)
+            backups, deleted = expire_days(days, backups, key=_key)
+            print "It's %s (%s in). %d deleted %r" % (now, now-start, len(deleted), deleted)
+            for x in sorted(backups, key=_key):
+                print "\tWe have %s: (%s old)" % (str(x), now-x.birthday)
 
-        time.sleep(0.5)
+            time.sleep(0.5)
+            print '-' * 20
+    except KeyboardInterrupt:
+        return
 
 def manage_snapshots(days, ec2connection, vol_id, timeout=timedelta(minutes=15),
                      description='snapman'):
@@ -130,6 +173,9 @@ def manage_snapshots(days, ec2connection, vol_id, timeout=timedelta(minutes=15),
     new = new.pop()
 
     while True:
+        # do we really need to wait for the snapshot to complete
+        # before deleting ones that it obviates? Do snapshots fail
+        # halfway through in practise?
         new.update()
         if new.status == 'completed':
             logging.info("%r completed in %s" % (new, _getnow() - start))
@@ -144,7 +190,7 @@ def manage_snapshots(days, ec2connection, vol_id, timeout=timedelta(minutes=15),
     snapshots = volume.snapshots()
 
     def _key(sn):
-        return (start - dateutil.parser.parse(sn.start_time)).days
+        return _tdseconds(start - dateutil.parser.parse(sn.start_time))
 
     keep, delete = expire_days(days, snapshots, key=_key)
 
@@ -162,7 +208,7 @@ def manage_snapshots(days, ec2connection, vol_id, timeout=timedelta(minutes=15),
     return keep, delete
 
 def main():
-    default_days = '1,2,3,4,5,6,7,14,21,28,42,56,84,112'
+    default_days = '1d,2d,3d,4d,5d,6d,1w,2w,3w,4w,6w,8w,12w,16w,22w'
     parser = OptionParser(usage="usage: %prog [options] vol_id")
     parser.add_option('--description', default='snapman', dest='description',
                       help="prefix for snapshot description")
@@ -170,26 +216,26 @@ def main():
                       help="timeout in minutes for creating snapshot")
     parser.add_option('--days', '-d',
                       default=default_days,
-                      help="Day spans to keep [default %default]")
+                      help="Time spans to keep [default %default]. Units h=hours, d=days (default), w=weeks, m=months, y=years. n.b. use --simulate to make sure that your setting behaves as you think it will")
     parser.add_option("-v", "--verbose",
                       action="store_true", dest="verbose", default=False)
     parser.add_option('--simulate', dest='simulate',
-                      default=False, action='store_true',
-                      help="Simulate and print the progression of backups using the given --days setting")
+                      help="Simulate and print the progression of backups using the given --days setting [example: --simulate=1d]")
 
     (options, args) = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO if options.verbose else logging.WARNING)
 
     try:
-        days = map(int, options.days.split(','))
-        _validate_days(days)
-    except ValueError:
+        days = parse_days(options.days)
+    except ValueError as e:
+        print e
         parser.print_help()
         sys.exit(1)
 
     if options.simulate:
-        return simulate(days)
+        simulate(days, options.simulate)
+        sys.exit(0)
 
     if len(args) != 1:
         parser.print_help()
