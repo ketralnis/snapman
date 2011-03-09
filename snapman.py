@@ -232,6 +232,8 @@ def main():
                       action="store_true", dest="verbose", default=False)
     parser.add_option('--simulate', dest='simulate',
                       help="Simulate and print the progression of backups using the given --days setting [example: --simulate=1d]")
+    parser.add_option('--region', dest='region', default=None,
+                      help="Connect to the given EC2 region")
 
     (options, args) = parser.parse_args()
 
@@ -259,6 +261,14 @@ def main():
         timeout = timedelta(seconds=parse_days(options.timeout, single=True))
 
     conn = EC2Connection()
+    if options.region is not None:
+        # this is a bit silly but we're working around a bug in boto
+        # where it half-ignores the region set in its own boto.cfg
+        # file
+        regions = dict((x.name, x)
+                       for x in conn.get_all_regions())
+        region = regions[options.region]
+        conn = EC2Connection(region=region)
 
     return manage_snapshots(days, conn, vol_id, timeout=timeout, description=options.description)
 
