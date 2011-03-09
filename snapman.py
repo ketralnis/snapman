@@ -95,7 +95,7 @@ def expire_days(days, found, key=lambda x: x):
                     backups.append(backup)
                     break
             else:
-                raise ValueError("Did we have a negative backup time? %r->%r" % (backup,k))
+                logging.info("Ignoring backup from the future %r->%r" % (backup,k))
 
     newdays = []
 
