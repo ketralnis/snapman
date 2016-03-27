@@ -95,7 +95,7 @@ def expire_days(days, found, key=lambda x: x):
                     backups.append(backup)
                     break
             else:
-                logging.info("Ignoring backup from the future %r->%r" % (backup,k))
+                logging.info("Ignoring backup from the future %r->%r", backup, k)
 
     newdays = []
 
@@ -108,7 +108,7 @@ def expire_days(days, found, key=lambda x: x):
             newdays.append(backups[0])
             to_delete.extend(backups[1:])
         else:
-            #logging.warning("No backups for period %r" % (bucket,))
+            #logging.warning("No backups for period %r", bucket)
             pass
 
     return newdays, to_delete
@@ -149,7 +149,7 @@ def simulate(days, ticksdiff):
             if created in deleted:
                 # refuse to delete the one we just created like
                 # manage_snapshots does
-                logging.debug('Would have deleted the just-created %r' % (created,))
+                logging.debug('Would have deleted the just-created %r', created)
                 backups += [created]
             print "It's %s (%s in). %d deleted %r" % (now, now-start, len(deleted), deleted)
             for x in sorted(backups, key=_key):
@@ -161,7 +161,7 @@ def simulate(days, ticksdiff):
         return
 
 def manage_snapshots(days, ec2connection, vol_id, timeout=timedelta(minutes=15),
-                     description='snapman'):
+                     description='snapman', do_snapshot=True, do_cleanup=True):
     volumes = ec2connection.get_all_volumes([vol_id])
     if vol_id not in [v.id for v in volumes]:
         raise Exception("Volume ID not found")
@@ -172,30 +172,31 @@ def manage_snapshots(days, ec2connection, vol_id, timeout=timedelta(minutes=15),
 
     descr = description + " " + start.strftime('%Y-%m-%d--%H:%M')
 
-    logging.info("Creating snapshot for %r: %r" % (volume, descr))
-    if not volume.create_snapshot(description=descr):
-        raise Exception("Failed to create snapshot?")
+    if do_snapshot:
+        logging.info("Creating snapshot for %r: %r", volume, descr)
+        if not volume.create_snapshot(description=descr):
+            raise Exception("Failed to create snapshot?")
 
     snapshots = volume.snapshots()
 
     new = [ sn for sn in snapshots if sn.description == descr ]
-    if len(new) != 1:
+    if do_snapshot and len(new) != 1:
         raise Exception("Snapshot %r not found in %r/%r" % (descr, snapshots, new))
-    new = new.pop()
+    new = new and new.pop()
 
-    while True:
+    while new and True:
         # do we really need to wait for the snapshot to complete
         # before deleting ones that it obviates? Do snapshots fail
         # halfway through in practise?
         new.update()
         if new.status == 'completed':
-            logging.info("%r completed in %s" % (new, _getnow() - start))
+            logging.info("%r completed in %s", new, _getnow() - start)
             break
         elif timeout is not None and _getnow() > start + timeout:
             raise Exception("Timed out creating %r" % (new,))
         else:
-            logging.debug("Waiting for snapshot %r: %r" % (new, new.progress))
-            time.sleep(5)
+            logging.debug("Waiting for snapshot %r: %r", new, new.progress)
+            time.sleep(max(30, (start-_getnow()).total_seconds()))
 
     # get the new list of snapshots now that the new one is completed
     snapshots = volume.snapshots()
@@ -203,33 +204,37 @@ def manage_snapshots(days, ec2connection, vol_id, timeout=timedelta(minutes=15),
     def _key(sn):
         return _tdseconds(start - dateutil.parser.parse(sn.start_time))
 
-    keep, delete = expire_days(days, snapshots, key=_key)
+    if do_cleanup:
+        keep, delete = expire_days(days, snapshots, key=_key)
+    else:
+        keep, delete = snapshots, ()
 
     for sn in delete:
-        if sn.id == new.id:
+        if new and sn.id == new.id:
             logging.warning("I will never delete the snapshot that I just created")
         else:
-            logging.info("Deleting snapshot %r" % (sn,))
+            logging.info("Deleting snapshot %r", sn)
             sn.delete()
 
     report = '\n'.join(('\t%r (%s)' % (sn, dateutil.parser.parse(sn.start_time)))
                         for sn in keep)
-    logging.info("Remaining snapshots:\n%s" % (report,))
+    logging.info("Remaining snapshots:\n%s", report)
 
     return keep, delete
 
 def main():
-    default_days = '1d,2d,3d,4d,5d,6d,1w,2w,3w,4w,6w,8w,12w,16w,22w'
+    default_days = '12h,1d,2d,3d,4d,5d,6d,1w,2w,3w,4w,6w,8w,12w,16w,22w'
     parser = OptionParser(usage="usage: %prog [options] vol_id")
     parser.add_option('--description', default='snapman', dest='description',
                       help="prefix for snapshot description")
     parser.add_option('--timeout', type='int', default=0, dest='timeout',
                       help="timeout for creating snapshots (see --days for units)")
+    parser.add_option('--no-snapshot', action='store_false', default=True, dest='snapshot', help="don't do the snapshot (only clean up)")
+    parser.add_option('--no-clean', '--no-cleanup', action='store_false', default=True, dest='cleanup', help="don't clean up (only do the snapshot")
+    parser.add_option('--logging', default='info')
     parser.add_option('--days', '-d',
                       default=default_days,
                       help="Time spans to keep [default %default]. Units h=hours, d=days (default), w=weeks, m=months, y=years. n.b. use --simulate to make sure that your setting behaves as you think it will")
-    parser.add_option("-v", "--verbose",
-                      action="store_true", dest="verbose", default=False)
     parser.add_option('--simulate', dest='simulate',
                       help="Simulate and print the progression of backups using the given --days setting [example: --simulate=1d]")
     parser.add_option('--region', dest='region', default=None,
@@ -237,7 +242,7 @@ def main():
 
     (options, args) = parser.parse_args()
 
-    logging.basicConfig(level=logging.INFO if options.verbose else logging.WARNING)
+    logging.basicConfig(level=getattr(logging, options.logging.upper()))
 
     try:
         days = parse_days(options.days)
@@ -270,7 +275,8 @@ def main():
         region = regions[options.region]
         conn = EC2Connection(region=region)
 
-    return manage_snapshots(days, conn, vol_id, timeout=timeout, description=options.description)
+    return manage_snapshots(days, conn, vol_id, timeout=timeout, description=options.description,
+                           do_snapshot=options.snapshot, do_cleanup=options.cleanup)
 
 if __name__ == '__main__':
     main()
