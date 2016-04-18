@@ -7,7 +7,7 @@ configurable set phased over increasing intervals
 Example
 --------
 
-      snapman.py --days 1,2,3,4,5,6,1w,2w,3w vol-abcde
+      snapman.py --days=1..6d,1..3w vol-abcde
 
 This takes a snapshot of `vol-abcde` and deletes all but one snapshot
 per day for the last week, plus two more at 2 and 3 weeks old
@@ -24,7 +24,7 @@ Configuration
 Requirements
 ------------
 
-* python 2.6
+* python 2.6+
 * boto
 * pytz
 * python-dateutil
@@ -37,8 +37,7 @@ To do
 * keep snapshots mounted and accessible at
   `/${mountpoint}/.snap/${timestamp}/` (can we do this without
   creating volumes out of every snapshot?)
-* options to only create snapshot, only expire snapshots, and only
-  print what snapshots would be deleted
+* option to only print what snapshots would be deleted
 * detect and warn that the given `--days` setting can't keep all
   of the requested backups instead of relying on `--simulate`
 
