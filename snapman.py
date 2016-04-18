@@ -22,7 +22,7 @@ def _tdseconds(delta):
 def _getnow():
     return datetime.now(tz=pytz.UTC)
 
-days_parse_re = re.compile('^([0-9.]+)([sMhdwmy]?)$')
+days_parse_re = re.compile('^([0-9]+)(\.\.)?([0-9]*)([sMhdwmy])$')
 def parse_days(days_str, single=False):
     specs = map(str.strip, days_str.split(','))
     spans = []
@@ -32,23 +32,25 @@ def parse_days(days_str, single=False):
         if not spec_match:
             raise Exception("Couldn't parse \"%s\"" % (spec,))
 
-        num_units = float(spec_match.group(1))
-        unit_type = spec_match.group(2)
+        num_units_1 = int(spec_match.group(1))
+        num_units_2 = int(spec_match.group(3) or spec_match.group(1))
+        unit_type = spec_match.group(4)
 
-        if unit_type == 's':
-            spans.append(num_units)
-        elif unit_type == 'M':
-            spans.append(num_units*60)
-        elif unit_type == 'h':
-            spans.append(num_units*60*60)
-        elif unit_type == 'd' or unit_type == '':
-            spans.append(num_units*60*60*24)
-        elif unit_type == 'w':
-            spans.append(num_units*60*60*24*7)
-        elif unit_type == 'm':
-            spans.append(num_units*60*60*24*7*4) # n.b. a 'month' is 4 weeks
-        elif unit_type == 'y':
-            spans.append(num_units*60*60*24*7*4*12) # and a year is 12 of our 'months'
+        for num_units in range(num_units_1, num_units_2+1):
+            if unit_type == 's':
+                spans.append(num_units)
+            elif unit_type == 'M':
+                spans.append(num_units*60)
+            elif unit_type == 'h':
+                spans.append(num_units*60*60)
+            elif unit_type == 'd' or unit_type == '':
+                spans.append(num_units*60*60*24)
+            elif unit_type == 'w':
+                spans.append(num_units*60*60*24*7)
+            elif unit_type == 'm':
+                spans.append(num_units*60*60*24*7*4) # n.b. a 'month' is 4 weeks
+            elif unit_type == 'y':
+                spans.append(num_units*60*60*24*7*4*12) # and a year is 12 of our 'months'
 
     if not spans:
         raise ValueError("no days specified")
@@ -223,14 +225,14 @@ def manage_snapshots(days, ec2connection, vol_id, timeout=timedelta(minutes=15),
     return keep, delete
 
 def main():
-    default_days = '12h,1d,2d,3d,4d,5d,6d,1w,2w,3w,4w,6w,8w,12w,16w,22w'
+    default_days = '12h,1..6d,1..22w'
     parser = OptionParser(usage="usage: %prog [options] vol_id")
     parser.add_option('--description', default='snapman', dest='description',
                       help="prefix for snapshot description")
     parser.add_option('--timeout', type='int', default=0, dest='timeout',
                       help="timeout for creating snapshots (see --days for units)")
     parser.add_option('--no-snapshot', action='store_false', default=True, dest='snapshot', help="don't do the snapshot (only clean up)")
-    parser.add_option('--no-clean', '--no-cleanup', action='store_false', default=True, dest='cleanup', help="don't clean up (only do the snapshot")
+    parser.add_option('--no-clean', '--no-cleanup', action='store_false', default=True, dest='cleanup', help="don't clean up (only do the snapshot)")
     parser.add_option('--logging', default='info')
     parser.add_option('--days', '-d',
                       default=default_days,
